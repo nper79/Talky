@@ -8,6 +8,8 @@ interface Props {
   onStartProcessing: () => void;
 }
 
+const FPS = 30; // Standardize UI to 30 FPS for frame calculations
+
 export const VideoManager: React.FC<Props> = ({ sourceVideos, onVideosUpdate, onStartProcessing }) => {
   // Trimming State
   const [trimmingVideoId, setTrimmingVideoId] = useState<string | null>(null);
@@ -18,7 +20,6 @@ export const VideoManager: React.FC<Props> = ({ sourceVideos, onVideosUpdate, on
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files || []) as File[];
     
-    // We need to load metadata to get duration, so we do this async
     files.forEach(file => {
       const video = document.createElement('video');
       const url = URL.createObjectURL(file);
@@ -33,7 +34,7 @@ export const VideoManager: React.FC<Props> = ({ sourceVideos, onVideosUpdate, on
           endTime: video.duration,
           duration: video.duration
         };
-        onVideosUpdate([...sourceVideos, newVideo]); // Note: In a real app with multiple files, we'd batch this
+        onVideosUpdate([...sourceVideos, newVideo]); 
       };
     });
   };
@@ -57,6 +58,13 @@ export const VideoManager: React.FC<Props> = ({ sourceVideos, onVideosUpdate, on
     setTempEnd(video.endTime);
   };
 
+  // Ensure video starts at the cut point when modal opens
+  useEffect(() => {
+    if (trimmingVideoId && trimVideoRef.current) {
+      trimVideoRef.current.currentTime = tempStart;
+    }
+  }, [trimmingVideoId]);
+
   const saveTrim = () => {
     if (trimmingVideoId) {
       onVideosUpdate(sourceVideos.map(v => 
@@ -68,9 +76,29 @@ export const VideoManager: React.FC<Props> = ({ sourceVideos, onVideosUpdate, on
 
   const activeTrimVideo = sourceVideos.find(v => v.id === trimmingVideoId);
 
-  // Helper to format time
-  const formatTime = (seconds: number) => {
-    return seconds.toFixed(2) + 's';
+  // Frame Calculations
+  const currentStartFrame = Math.floor(tempStart * FPS);
+  const currentEndFrame = Math.floor(tempEnd * FPS);
+  const maxFrames = activeTrimVideo ? Math.floor(activeTrimVideo.duration * FPS) : 0;
+
+  const handleFrameChange = (type: 'start' | 'end', frame: number) => {
+    if (!activeTrimVideo) return;
+    const time = frame / FPS;
+    
+    // Pause video to show precise frame
+    if (trimVideoRef.current) {
+      trimVideoRef.current.pause();
+    }
+    
+    if (type === 'start') {
+      const newStart = Math.min(time, tempEnd - 0.1); // Prevent overlap
+      setTempStart(newStart);
+      if (trimVideoRef.current) trimVideoRef.current.currentTime = newStart;
+    } else {
+      const newEnd = Math.max(time, tempStart + 0.1);
+      setTempEnd(newEnd);
+      if (trimVideoRef.current) trimVideoRef.current.currentTime = newEnd;
+    }
   };
 
   const hasTalking = sourceVideos.some(v => v.state === AvatarState.TALKING);
@@ -79,7 +107,7 @@ export const VideoManager: React.FC<Props> = ({ sourceVideos, onVideosUpdate, on
   return (
     <div className="space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-500">
       <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">
-        {/* Upload Card - Adjusted for Vertical Layout */}
+        {/* Upload Card */}
         <div className="relative group flex flex-col items-center justify-center p-4 border-2 border-dashed border-slate-700 rounded-3xl bg-slate-900/40 hover:bg-slate-900/60 hover:border-blue-500/50 transition-all cursor-pointer aspect-[9/16]">
           <input
             type="file"
@@ -105,12 +133,10 @@ export const VideoManager: React.FC<Props> = ({ sourceVideos, onVideosUpdate, on
                 src={video.previewUrl} 
                 className="w-full h-full object-cover brightness-90 group-hover:brightness-100 transition-all"
                 muted
-                // Play only the trimmed segment on hover
                 onMouseOver={(e) => {
                   const v = e.currentTarget;
                   v.currentTime = video.startTime;
                   v.play();
-                  // Simple loop check for hover preview
                   const checkTime = () => {
                     if (v.currentTime >= video.endTime) {
                       v.currentTime = video.startTime;
@@ -211,97 +237,107 @@ export const VideoManager: React.FC<Props> = ({ sourceVideos, onVideosUpdate, on
       {/* Trimming Modal */}
       {activeTrimVideo && (
         <div className="fixed inset-0 z-[100] bg-slate-950/90 backdrop-blur-md flex items-center justify-center p-4">
-          <div className="bg-slate-900 border border-slate-800 rounded-3xl p-6 w-full max-w-lg flex flex-col gap-6 shadow-2xl">
-            <h3 className="text-xl font-bold text-white text-center">Trim Clip</h3>
+          <div className="bg-slate-900 border border-slate-800 rounded-3xl p-8 w-full max-w-2xl flex flex-col gap-8 shadow-2xl">
+            <h3 className="text-2xl font-bold text-white text-center">Trim Clip Frames</h3>
             
-            <div className="relative aspect-[9/16] w-full max-w-[200px] mx-auto bg-black rounded-xl overflow-hidden shadow-lg border border-slate-800">
-              <video 
-                ref={trimVideoRef}
-                src={activeTrimVideo.previewUrl}
-                className="w-full h-full object-cover"
-                controls={false}
-                autoPlay
-                loop
-                onTimeUpdate={(e) => {
-                  const v = e.currentTarget;
-                  // Enforce the loop visually during preview
-                  if (v.currentTime < tempStart || v.currentTime > tempEnd) {
-                     // Just let it play for UI feedback, but we could force seek here if we wanted strictly preview
-                  }
-                }}
-              />
-              {/* Range Visualization Overlay */}
-              <div className="absolute bottom-0 left-0 right-0 h-1.5 bg-slate-800/50 pointer-events-none">
-                 <div 
-                    className="h-full bg-blue-500 transition-all duration-100"
-                    style={{
-                      marginLeft: `${(tempStart / activeTrimVideo.duration) * 100}%`,
-                      width: `${((tempEnd - tempStart) / activeTrimVideo.duration) * 100}%`
+            <div className="flex flex-col md:flex-row gap-8 items-center">
+              {/* Preview */}
+              <div className="relative aspect-[9/16] w-[180px] flex-shrink-0 bg-black rounded-2xl overflow-hidden shadow-lg border border-slate-800">
+                <video 
+                  ref={trimVideoRef}
+                  src={activeTrimVideo.previewUrl}
+                  className="w-full h-full object-cover"
+                  controls={false}
+                  muted // Muted as requested
+                  // No autoplay or loop to allow precise frame viewing
+                />
+              </div>
+
+              {/* Controls */}
+              <div className="flex-1 w-full space-y-6">
+                
+                {/* Start Frame Control */}
+                <div className="space-y-2">
+                  <div className="flex justify-between items-center">
+                    <label className="text-sm font-bold text-slate-300">Start Frame:</label>
+                    <div className="flex items-center gap-2">
+                      <input 
+                        type="number" 
+                        value={currentStartFrame}
+                        onChange={(e) => handleFrameChange('start', parseInt(e.target.value) || 0)}
+                        className="bg-slate-950 border border-slate-700 rounded-lg px-3 py-1 text-sm w-20 text-right focus:border-blue-500 outline-none font-mono"
+                      />
+                      <span className="text-xs text-slate-500 font-mono w-12 text-right">{tempStart.toFixed(2)}s</span>
+                    </div>
+                  </div>
+                  <input 
+                    type="range"
+                    min="0"
+                    max={maxFrames}
+                    value={currentStartFrame}
+                    onChange={(e) => handleFrameChange('start', parseInt(e.target.value))}
+                    className="w-full h-2 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-blue-500"
+                  />
+                </div>
+
+                {/* End Frame Control */}
+                <div className="space-y-2">
+                  <div className="flex justify-between items-center">
+                    <label className="text-sm font-bold text-slate-300">End Frame:</label>
+                    <div className="flex items-center gap-2">
+                      <input 
+                        type="number" 
+                        value={currentEndFrame}
+                        onChange={(e) => handleFrameChange('end', parseInt(e.target.value) || 0)}
+                        className="bg-slate-950 border border-slate-700 rounded-lg px-3 py-1 text-sm w-20 text-right focus:border-blue-500 outline-none font-mono"
+                      />
+                      <span className="text-xs text-slate-500 font-mono w-12 text-right">{tempEnd.toFixed(2)}s</span>
+                    </div>
+                  </div>
+                  <input 
+                    type="range"
+                    min="0"
+                    max={maxFrames}
+                    value={currentEndFrame}
+                    onChange={(e) => handleFrameChange('end', parseInt(e.target.value))}
+                    className="w-full h-2 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-blue-500"
+                  />
+                </div>
+
+                <div className="pt-4 space-y-3">
+                  <button 
+                    onClick={() => {
+                      if (trimVideoRef.current) {
+                        trimVideoRef.current.currentTime = tempStart;
+                        trimVideoRef.current.play();
+                        setTimeout(() => trimVideoRef.current?.pause(), (tempEnd - tempStart) * 1000);
+                      }
                     }}
-                 />
-              </div>
-            </div>
-
-            <div className="grid grid-cols-2 gap-4">
-              <div className="p-3 bg-slate-950 rounded-xl border border-slate-800 text-center">
-                <p className="text-[10px] text-slate-500 uppercase tracking-wider mb-1">Start Time</p>
-                <div className="flex items-center justify-center gap-2">
-                  <span className="text-lg font-mono font-bold text-blue-400">{formatTime(tempStart)}</span>
-                  <button 
-                    onClick={() => trimVideoRef.current && setTempStart(trimVideoRef.current.currentTime)}
-                    className="p-1 bg-blue-600/20 text-blue-400 hover:bg-blue-600 hover:text-white rounded transition-colors"
-                    title="Set Start at Current Time"
+                    className="w-full py-3 bg-slate-800 text-slate-300 rounded-xl text-xs font-bold uppercase tracking-wider hover:bg-slate-700 transition-colors flex items-center justify-center gap-2"
                   >
                     <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
-                      <path fillRule="evenodd" d="M3 5a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zM3 10a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zM3 15a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1z" clipRule="evenodd" />
+                      <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM9.555 7.168A1 1 0 008 8v4a1 1 0 001.555.832l3-2a1 1 0 000-1.664l-3-2z" clipRule="evenodd" />
                     </svg>
+                    Preview Loop
                   </button>
-                </div>
-              </div>
-              <div className="p-3 bg-slate-950 rounded-xl border border-slate-800 text-center">
-                <p className="text-[10px] text-slate-500 uppercase tracking-wider mb-1">End Time</p>
-                <div className="flex items-center justify-center gap-2">
-                  <span className="text-lg font-mono font-bold text-blue-400">{formatTime(tempEnd)}</span>
-                  <button 
-                    onClick={() => trimVideoRef.current && setTempEnd(trimVideoRef.current.currentTime)}
-                    className="p-1 bg-blue-600/20 text-blue-400 hover:bg-blue-600 hover:text-white rounded transition-colors"
-                    title="Set End at Current Time"
-                  >
-                    <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
-                      <path fillRule="evenodd" d="M3 5a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zM3 10a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zM3 15a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1z" clipRule="evenodd" />
-                    </svg>
-                  </button>
-                </div>
-              </div>
-            </div>
 
-            <div className="space-y-2">
-               <button 
-                 onClick={() => {
-                   if (trimVideoRef.current) {
-                     trimVideoRef.current.currentTime = tempStart;
-                     trimVideoRef.current.play();
-                     setTimeout(() => trimVideoRef.current?.pause(), (tempEnd - tempStart) * 1000);
-                   }
-                 }}
-                 className="w-full py-2 bg-slate-800 text-slate-300 rounded-xl text-xs font-bold uppercase tracking-wider hover:bg-slate-700 transition-colors"
-               >
-                 Preview Selection
-               </button>
-               <div className="flex gap-2">
-                  <button 
-                    onClick={() => setTrimmingVideoId(null)}
-                    className="flex-1 py-3 border border-slate-700 text-slate-400 rounded-xl font-bold hover:bg-slate-800 transition-colors"
-                  >
-                    Cancel
-                  </button>
-                  <button 
-                    onClick={saveTrim}
-                    className="flex-1 py-3 bg-blue-600 text-white rounded-xl font-bold hover:bg-blue-500 shadow-lg shadow-blue-500/20 transition-colors"
-                  >
-                    Save Changes
-                  </button>
-               </div>
+                  <div className="flex gap-3">
+                    <button 
+                      onClick={() => setTrimmingVideoId(null)}
+                      className="flex-1 py-3 border border-slate-700 text-slate-400 rounded-xl font-bold hover:bg-slate-800 transition-colors"
+                    >
+                      Cancel
+                    </button>
+                    <button 
+                      onClick={saveTrim}
+                      className="flex-1 py-3 bg-blue-600 text-white rounded-xl font-bold hover:bg-blue-500 shadow-lg shadow-blue-500/20 transition-colors"
+                    >
+                      Save
+                    </button>
+                  </div>
+                </div>
+
+              </div>
             </div>
           </div>
         </div>

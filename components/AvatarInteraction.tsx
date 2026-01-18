@@ -10,7 +10,7 @@ interface Props {
 
 export const AvatarInteraction: React.FC<Props> = ({ frames }) => {
   const [userInput, setUserInput] = useState('');
-  const [aiResponse, setAiResponse] = useState('');
+  const [displayedText, setDisplayedText] = useState(''); // Text shown to user
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [isListening, setIsListening] = useState(false);
   const [currentFrameIndex, setCurrentFrameIndex] = useState(0);
@@ -40,7 +40,7 @@ export const AvatarInteraction: React.FC<Props> = ({ frames }) => {
 
     setStatus('thinking');
     setError(null);
-    setAiResponse(''); 
+    setDisplayedText(''); // Clear previous text immediately
     
     if (sourceRef.current) {
       sourceRef.current.stop();
@@ -50,7 +50,7 @@ export const AvatarInteraction: React.FC<Props> = ({ frames }) => {
     try {
       // Step 1: Brain
       const textResponse = await getChatResponse(text);
-      setAiResponse(textResponse);
+      // Note: We do NOT show textResponse yet. We wait for audio.
       setStatus('generating_audio');
 
       // Step 2: Voice
@@ -71,6 +71,8 @@ export const AvatarInteraction: React.FC<Props> = ({ frames }) => {
       sourceRef.current = source;
       
       // Step 4: Play
+      // Show text ONLY when audio starts
+      setDisplayedText(textResponse);
       setIsSpeaking(true);
       setStatus('speaking');
       source.start();
@@ -78,6 +80,8 @@ export const AvatarInteraction: React.FC<Props> = ({ frames }) => {
       source.onended = () => {
         setIsSpeaking(false);
         setStatus('idle');
+        // Optional: Clear text when audio ends if desired, or leave it until next turn
+        // setDisplayedText(''); 
       };
 
       setUserInput(''); 
@@ -179,11 +183,11 @@ export const AvatarInteraction: React.FC<Props> = ({ frames }) => {
         )}
 
         {/* AI Response Subtitle Bubble */}
-        {aiResponse && (
+        {displayedText && (
           <div className="absolute bottom-6 left-6 right-6">
             <div className="bg-slate-950/80 backdrop-blur-md border border-white/10 p-4 rounded-2xl shadow-xl animate-in slide-in-from-bottom-2">
               <p className="text-slate-100 text-sm font-medium leading-relaxed text-center">
-                "{aiResponse}"
+                "{displayedText}"
               </p>
             </div>
           </div>

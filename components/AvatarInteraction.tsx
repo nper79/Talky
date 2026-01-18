@@ -1,347 +1,322 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import { Frame, AvatarState } from '../types';
-import { decode, decodeAudioData, float32ToBase64PCM } from '../utils/audio';
-import { GoogleGenAI, LiveServerMessage, Modality } from "@google/genai";
+import { decode, decodeAudioData } from '../utils/audio';
+import { getChatResponse, generateSpeech } from '../services/gemini';
 
 interface Props {
   frames: Frame[];
 }
 
 export const AvatarInteraction: React.FC<Props> = ({ frames }) => {
-  // State
-  const [isConnected, setIsConnected] = useState(false);
-  const [isSpeaking, setIsSpeaking] = useState(false); // Avatar is outputting audio
-  const [isUserSpeaking, setIsUserSpeaking] = useState(false); // User is inputting audio (VAD)
+  // Estados de UI e Lógica
+  const [isRecording, setIsRecording] = useState(false);
+  const [isThinking, setIsThinking] = useState(false);
+  const [isSpeaking, setIsSpeaking] = useState(false);
+  const [transcription, setTranscription] = useState('');
+  const [aiResponse, setAiResponse] = useState('');
   const [currentFrameIndex, setCurrentFrameIndex] = useState(0);
-  const [error, setError] = useState<string | null>(null);
   const [isFullScreen, setIsFullScreen] = useState(false);
-  
-  // Refs for Audio & Session
-  const inputAudioContextRef = useRef<AudioContext | null>(null);
-  const outputAudioContextRef = useRef<AudioContext | null>(null);
-  const nextStartTimeRef = useRef<number>(0);
-  const sessionPromiseRef = useRef<Promise<any> | null>(null);
-  const streamRef = useRef<MediaStream | null>(null);
-  const processorRef = useRef<ScriptProcessorNode | null>(null);
-  
+  const [error, setError] = useState<string | null>(null);
+
+  // Refs de Áudio e Reconhecimento
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const currentSourceRef = useRef<AudioBufferSourceNode | null>(null);
+  const recognitionRef = useRef<any>(null);
+  const isRecognitionActiveRef = useRef(false);
+
   const idleFrames = frames.filter(f => f.state === AvatarState.IDLE);
   const talkingFrames = frames.filter(f => f.state === AvatarState.TALKING);
 
-  // --- Animation Loop ---
+  // --- Inicialização do Reconhecimento de Voz ---
   useEffect(() => {
-    // Determine which set of frames to use based on avatar speaking state
-    const activePool = isSpeaking ? (talkingFrames.length > 0 ? talkingFrames : frames) : (idleFrames.length > 0 ? idleFrames : frames);
+    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (SpeechRecognition) {
+      const recognition = new SpeechRecognition();
+      recognition.continuous = true;
+      recognition.interimResults = true;
+      recognition.lang = 'en-US'; // Changed to English to match app context, but keep logic robust
+
+      recognition.onstart = () => {
+        isRecognitionActiveRef.current = true;
+      };
+
+      recognition.onend = () => {
+        isRecognitionActiveRef.current = false;
+      };
+
+      recognition.onresult = (event: any) => {
+        let interimTranscript = '';
+        for (let i = event.resultIndex; i < event.results.length; ++i) {
+          if (event.results[i].isFinal) {
+            // Processing happens on button release
+          } else {
+            interimTranscript += event.results[i][0].transcript;
+          }
+        }
+        const currentText = interimTranscript || event.results[event.results.length - 1][0].transcript;
+        setTranscription(currentText);
+      };
+
+      recognition.onerror = (event: any) => {
+        console.error('Speech recognition error', event.error);
+        if (event.error !== 'no-speech' && event.error !== 'aborted') {
+           setError('Microphone error: ' + event.error);
+           setIsRecording(false);
+        }
+      };
+
+      recognitionRef.current = recognition;
+    } else {
+      setError('Your browser does not support speech recognition.');
+    }
+
+    return () => {
+      if (recognitionRef.current) {
+        try {
+          recognitionRef.current.stop();
+        } catch (e) {}
+      }
+    };
+  }, []);
+
+  // --- Loop de Animação ---
+  useEffect(() => {
+    const activePool = isSpeaking 
+      ? (talkingFrames.length > 0 ? talkingFrames : frames) 
+      : (idleFrames.length > 0 ? idleFrames : frames);
     
-    // Adjust frame rate: slower for idle, faster for talking
     const intervalTime = isSpeaking ? 80 : 150;
 
     const interval = setInterval(() => {
       setCurrentFrameIndex(prev => (prev + 1) % activePool.length);
-      
-      // Sync 'isSpeaking' state with audio playback time
-      if (outputAudioContextRef.current) {
-        const ctx = outputAudioContextRef.current;
-        // If current time is less than the scheduled end time of the last chunk, we are still playing audio
-        const isPlaying = ctx.currentTime < nextStartTimeRef.current;
-        if (isPlaying !== isSpeaking) {
-          setIsSpeaking(isPlaying);
-        }
-      }
     }, intervalTime);
 
     return () => clearInterval(interval);
   }, [isSpeaking, idleFrames, talkingFrames, frames]);
 
-
-  // --- Live API Connection ---
-  const connect = async () => {
+  // --- Ações de Conversação ---
+  const startRecording = () => {
+    if (!recognitionRef.current) return;
+    
+    // Reset de estados
     setError(null);
-    try {
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-      
-      // 1. Setup Audio Contexts
-      const inputCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
-      const outputCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
-      inputAudioContextRef.current = inputCtx;
-      outputAudioContextRef.current = outputCtx;
-      nextStartTimeRef.current = 0;
+    setTranscription('');
+    setAiResponse('');
+    stopAudio();
+    
+    setIsRecording(true);
 
-      // 2. Setup Microphone Stream
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      streamRef.current = stream;
-      
-      // 3. Connect to Live API
-      const sessionPromise = ai.live.connect({
-        model: 'gemini-2.5-flash-native-audio-preview-12-2025',
-        config: {
-          responseModalities: [Modality.AUDIO], // Audio-only response for speed
-          systemInstruction: { parts: [{ text: "You are a lively, friendly 3D avatar. Keep your responses concise (1-2 sentences) and conversational." }] },
-          speechConfig: {
-            voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } },
-          },
-        },
-        callbacks: {
-          onopen: () => {
-            console.log("Live Session Connected");
-            setIsConnected(true);
-            
-            // Start streaming audio input
-            const source = inputCtx.createMediaStreamSource(stream);
-            const processor = inputCtx.createScriptProcessor(4096, 1, 1);
-            processorRef.current = processor;
-            
-            processor.onaudioprocess = (e) => {
-              const inputData = e.inputBuffer.getChannelData(0);
-              // Simple volume check for "User Speaking" visualizer
-              let sum = 0;
-              for(let i=0; i<inputData.length; i++) sum += inputData[i] * inputData[i];
-              const rms = Math.sqrt(sum / inputData.length);
-              setIsUserSpeaking(rms > 0.02); // Threshold
-
-              const base64PCM = float32ToBase64PCM(inputData);
-              
-              if (sessionPromiseRef.current) {
-                sessionPromiseRef.current.then(session => {
-                  session.sendRealtimeInput({
-                    media: {
-                      mimeType: 'audio/pcm;rate=16000',
-                      data: base64PCM
-                    }
-                  });
-                });
-              }
-            };
-            
-            source.connect(processor);
-            processor.connect(inputCtx.destination);
-          },
-          onmessage: async (msg: LiveServerMessage) => {
-            // Handle Audio Output
-            const base64Audio = msg.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
-            
-            if (base64Audio) {
-              const ctx = outputAudioContextRef.current;
-              if (ctx) {
-                // Decode
-                const bytes = decode(base64Audio);
-                const audioBuffer = await decodeAudioData(bytes, ctx, 24000, 1);
-                
-                // Schedule
-                const now = ctx.currentTime;
-                // Start at next available slot, or now if we fell behind (gapless logic)
-                const startTime = Math.max(now, nextStartTimeRef.current);
-                
-                const source = ctx.createBufferSource();
-                source.buffer = audioBuffer;
-                source.connect(ctx.destination);
-                source.start(startTime);
-                
-                nextStartTimeRef.current = startTime + audioBuffer.duration;
-              }
-            }
-
-            // Handle Interruption (User spoke while model was talking)
-            if (msg.serverContent?.interrupted) {
-              console.log("Model interrupted");
-              nextStartTimeRef.current = 0; // Stop future playback
-            }
-          },
-          onclose: () => {
-            console.log("Session Closed");
-            setIsConnected(false);
-          },
-          onerror: (err) => {
-            console.error("Live API Error:", err);
-            setError("Connection lost.");
-            disconnect();
-          }
-        }
-      });
-      
-      sessionPromiseRef.current = sessionPromise;
-
-    } catch (err: any) {
-      console.error("Connection failed:", err);
-      setError("Failed to access microphone or connect to AI.");
-      setIsConnected(false);
-    }
-  };
-
-  const disconnect = () => {
-    // Close Session
-    if (sessionPromiseRef.current) {
-      sessionPromiseRef.current.then(session => session.close());
-      sessionPromiseRef.current = null;
-    }
-
-    // Stop Microphone
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach(track => track.stop());
-      streamRef.current = null;
+    // Prevent "already started" error
+    if (!isRecognitionActiveRef.current) {
+      try {
+        recognitionRef.current.start();
+      } catch (e) {
+        console.warn('Recognition start error:', e);
+      }
     }
     
-    // Stop Processor
-    if (processorRef.current) {
-      processorRef.current.disconnect();
-      processorRef.current = null;
+    // Ensure AudioContext is ready for playback later
+    if (!audioContextRef.current) {
+      audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
     }
-
-    // Close Audio Contexts
-    if (inputAudioContextRef.current) {
-      inputAudioContextRef.current.close();
-      inputAudioContextRef.current = null;
-    }
-    if (outputAudioContextRef.current) {
-      outputAudioContextRef.current.close();
-      outputAudioContextRef.current = null;
-    }
-
-    setIsConnected(false);
-    setIsSpeaking(false);
-    setIsUserSpeaking(false);
   };
 
-  // Cleanup on unmount
-  useEffect(() => {
-    return () => {
-      disconnect();
-    };
-  }, []);
+  const stopRecording = async () => {
+    if (!recognitionRef.current || !isRecording) return;
+    
+    setIsRecording(false);
+    
+    // We try to stop the engine. 
+    // onend will fire and update isRecognitionActiveRef.
+    try {
+      recognitionRef.current.stop();
+    } catch (e) {
+      console.warn('Recognition stop error:', e);
+    }
+    
+    if (transcription.trim().length < 2) return;
+
+    processSpeech(transcription);
+  };
+
+  const processSpeech = async (text: string) => {
+    setIsThinking(true);
+    try {
+      // 1. Get Chat Response
+      const responseText = await getChatResponse(text);
+      setAiResponse(responseText);
+      
+      // 2. Generate Audio (TTS)
+      const audioDataB64 = await generateSpeech(responseText);
+      
+      if (audioDataB64) {
+        playAudio(audioDataB64);
+      }
+    } catch (err: any) {
+      setError(err.message || 'Failed to process response.');
+    } finally {
+      setIsThinking(false);
+    }
+  };
+
+  const playAudio = async (base64: string) => {
+    if (!audioContextRef.current) return;
+    
+    stopAudio();
+    
+    const bytes = decode(base64);
+    const buffer = await decodeAudioData(bytes, audioContextRef.current, 24000, 1);
+    
+    const source = audioContextRef.current.createBufferSource();
+    source.buffer = buffer;
+    source.connect(audioContextRef.current.destination);
+    
+    source.onended = () => setIsSpeaking(false);
+    
+    currentSourceRef.current = source;
+    setIsSpeaking(true);
+    source.start(0);
+  };
+
+  const stopAudio = () => {
+    if (currentSourceRef.current) {
+      try { currentSourceRef.current.stop(); } catch(e) {}
+      currentSourceRef.current = null;
+    }
+    setIsSpeaking(false);
+  };
 
   const currentFrame = isSpeaking && talkingFrames.length > 0
     ? talkingFrames[currentFrameIndex % talkingFrames.length]
     : idleFrames.length > 0 ? idleFrames[currentFrameIndex % idleFrames.length] : frames[currentFrameIndex];
 
   return (
-    <div className={`flex flex-col items-center w-full transition-all duration-500 ${isFullScreen ? 'fixed inset-0 z-50 bg-black justify-center' : 'max-w-4xl mx-auto animate-in fade-in duration-700'}`}>
+    <div className={`flex flex-col items-center w-full transition-all duration-500 ${isFullScreen ? 'fixed inset-0 z-50 bg-black justify-center' : 'max-w-4xl mx-auto'}`}>
       
-      {/* Avatar Display */}
       <div className={`relative overflow-hidden transition-all duration-500 ${
         isFullScreen 
           ? 'w-full h-full' 
-          : 'w-full max-w-[360px] aspect-[9/16] bg-slate-900 rounded-3xl border-4 border-slate-800 shadow-2xl mb-6 group ring-1 ring-slate-800/50'
+          : 'w-full max-w-[360px] aspect-[9/16] bg-slate-900 rounded-3xl border-4 border-slate-800 shadow-2xl mb-6 ring-1 ring-slate-800/50'
       }`}>
         {currentFrame && (
           <img 
             src={currentFrame.dataUrl} 
-            className="w-full h-full object-cover transition-opacity duration-300"
+            className="w-full h-full object-cover"
             alt="Avatar" 
           />
         )}
-        
-        {/* Full Screen Toggle Button (Top Left) */}
-        <button 
-          onClick={() => setIsFullScreen(!isFullScreen)}
-          className="absolute top-4 left-4 p-2.5 bg-slate-950/40 hover:bg-slate-900 backdrop-blur-md rounded-full text-white transition-all border border-white/10 z-20 hover:scale-110 active:scale-95 shadow-lg"
-          title={isFullScreen ? "Exit Full Screen" : "Enter Full Screen"}
-        >
-          {isFullScreen ? (
-             <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
-               <path fillRule="evenodd" d="M5 10a1 1 0 011-1h8a1 1 0 110 2H6a1 1 0 01-1-1z" clipRule="evenodd" />
-             </svg>
-          ) : (
-             <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
-               <path fillRule="evenodd" d="M3 4a1 1 0 011-1h4a1 1 0 010 2H6.414l2.293 2.293a1 1 0 11-1.414 1.414L5 6.414V8a1 1 0 01-2 0V4zm9 1a1 1 0 010-2h4a1 1 0 011 1v4a1 1 0 01-2 0V6.414l-2.293 2.293a1 1 0 11-1.414-1.414L13.586 5H12zm-9 9a1 1 0 011-1h4a1 1 0 010 2H6.414l2.293 2.293a1 1 0 01-1.414 1.414L5 13.586V15a1 1 0 01-2 0v-4a1 1 0 011-1zm9 1a1 1 0 010-2h4a1 1 0 011 1v4a1 1 0 01-2 0v-1.586l-2.293 2.293a1 1 0 01-1.414-1.414L13.586 15H12z" clipRule="evenodd" />
-             </svg>
-          )}
-        </button>
 
-        {/* Status Badge (Top Right) */}
+        {/* Status Badge */}
         <div className="absolute top-4 right-4 px-3 py-1 bg-slate-950/60 backdrop-blur-md rounded-full border border-white/10 flex items-center gap-2 z-20">
           <div className={`w-2 h-2 rounded-full transition-colors duration-300 ${
-            isConnected 
-              ? (isSpeaking ? 'bg-green-500 shadow-[0_0_10px_rgba(34,197,94,0.8)]' : 'bg-blue-500') 
-              : 'bg-red-500'
+            isRecording ? 'bg-red-500 animate-pulse' : (isSpeaking ? 'bg-green-500' : (isThinking ? 'bg-yellow-500' : 'bg-blue-500'))
           }`}></div>
-          <span className="text-xs font-bold uppercase tracking-widest text-white">
-            {isConnected ? 'Live' : 'Offline'}
+          <span className="text-[10px] font-bold uppercase tracking-widest text-white">
+            {isRecording ? 'Listening' : (isThinking ? 'Thinking' : (isSpeaking ? 'Speaking' : 'Ready'))}
           </span>
         </div>
 
-        {/* User Speaking Visualizer (Simple Pulse) */}
-        {isConnected && (
-          <div className={`absolute bottom-0 left-0 right-0 h-1 bg-gradient-to-r from-blue-500 to-indigo-500 transition-opacity duration-200 z-10 ${isUserSpeaking ? 'opacity-100' : 'opacity-0'}`}></div>
-        )}
-        
-        {/* Connection Overlay (Center - Visible when disconnected) */}
-        {!isConnected && !error && (
-          <div className="absolute inset-0 bg-slate-950/60 backdrop-blur-[2px] flex items-center justify-center z-20">
-             <button 
-               onClick={connect}
-               className="px-8 py-3 bg-blue-600 hover:bg-blue-500 text-white rounded-2xl font-bold uppercase tracking-wider shadow-xl shadow-blue-600/20 hover:scale-105 transition-all flex items-center gap-2"
-             >
-               <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
-                 <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM9.555 7.168A1 1 0 008 8v4a1 1 0 001.555.832l3-2a1 1 0 000-1.664l-3-2z" clipRule="evenodd" />
-               </svg>
-               Start Live Chat
-             </button>
+        {/* Fullscreen Toggle */}
+        <button 
+          onClick={() => setIsFullScreen(!isFullScreen)}
+          className="absolute top-4 left-4 p-2 bg-slate-950/40 hover:bg-slate-900 backdrop-blur-md rounded-full text-white z-20"
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+            <path fillRule="evenodd" d="M3 4a1 1 0 011-1h4a1 1 0 010 2H6.414l2.293 2.293a1 1 0 11-1.414 1.414L5 6.414V8a1 1 0 01-2 0V4zm9 1a1 1 0 010-2h4a1 1 0 011 1v4a1 1 0 01-2 0V6.414l-2.293 2.293a1 1 0 11-1.414-1.414L13.586 5H12zm-9 9a1 1 0 011-1h4a1 1 0 010 2H6.414l2.293 2.293a1 1 0 01-1.414 1.414L5 13.586V15a1 1 0 01-2 0v-4a1 1 0 011-1zm9 1a1 1 0 010-2h4a1 1 0 011 1v4a1 1 0 01-2 0v-1.586l-2.293 2.293a1 1 0 01-1.414-1.414L13.586 15H12z" clipRule="evenodd" />
+          </svg>
+        </button>
+
+        {/* Transcription Overlay */}
+        {(isRecording || transcription) && (
+          <div className="absolute bottom-24 left-4 right-4 z-20">
+             <div className="bg-slate-950/60 backdrop-blur-md p-3 rounded-2xl border border-white/5 text-center shadow-2xl">
+                <p className="text-white text-sm font-medium line-clamp-2">
+                  {transcription || "Listening..."}
+                </p>
+             </div>
           </div>
         )}
 
-        {/* Full Screen Controls Overlay (Bottom - Visible when Connected in FS) */}
-        {isFullScreen && isConnected && (
-            <div className="absolute bottom-12 left-0 right-0 flex justify-center z-30 pointer-events-none">
-                 <button
-                    onClick={disconnect}
-                    className="pointer-events-auto px-8 py-4 bg-red-600 hover:bg-red-500 text-white rounded-full font-bold shadow-2xl flex items-center gap-3 backdrop-blur-md border border-white/10 transition-transform hover:scale-105 active:scale-95"
-                >
-                    <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
-                       <path fillRule="evenodd" d="M3 5a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zM3 10a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zM3 15a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1z" clipRule="evenodd" />
-                    </svg>
-                    End Session
-                </button>
+        {/* Thinking Indicator */}
+        {isThinking && (
+          <div className="absolute inset-0 bg-slate-950/20 backdrop-blur-[1px] flex items-center justify-center z-10">
+            <div className="flex gap-1">
+              <div className="w-2 h-2 bg-blue-500 rounded-full animate-bounce" style={{ animationDelay: '0s' }}></div>
+              <div className="w-2 h-2 bg-blue-500 rounded-full animate-bounce" style={{ animationDelay: '0.1s' }}></div>
+              <div className="w-2 h-2 bg-blue-500 rounded-full animate-bounce" style={{ animationDelay: '0.2s' }}></div>
             </div>
+          </div>
         )}
-        
-        {/* Error Overlay in Full Screen */}
-        {isFullScreen && error && (
-            <div className="absolute top-20 left-4 right-4 z-30">
-               <div className="bg-red-500/90 backdrop-blur-md border border-white/10 text-white text-sm p-4 rounded-xl flex items-center justify-between shadow-xl">
-                  <span>{error}</span>
-                  <button onClick={connect} className="bg-white/20 px-3 py-1 rounded-lg text-xs font-bold uppercase hover:bg-white/30">Retry</button>
-               </div>
-            </div>
-        )}
-
       </div>
 
-      {/* Normal Controls (Only visible if NOT full screen) */}
+      {/* PTT Button */}
       {!isFullScreen && (
-        <div className="w-full max-w-[400px] space-y-4">
-            {error && (
-            <div className="bg-red-500/10 border border-red-500/50 text-red-400 text-xs p-3 rounded-xl flex items-center gap-2 animate-in slide-in-from-top-2 justify-between">
-                <div className="flex items-center gap-2">
-                <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                </svg>
-                <span>{error}</span>
-                </div>
-                <button onClick={connect} className="underline hover:text-red-300">Retry</button>
-            </div>
+        <div className="w-full max-w-[400px] flex flex-col items-center gap-6">
+          <div className="relative group">
+            {/* Pulsing rings when recording */}
+            {isRecording && (
+              <>
+                <div className="absolute inset-0 bg-blue-500 rounded-full animate-ping opacity-25"></div>
+                <div className="absolute inset-0 bg-blue-500 rounded-full animate-pulse opacity-40 scale-125"></div>
+              </>
             )}
             
-            {isConnected && (
-            <div className="flex items-center justify-between bg-slate-900 rounded-2xl p-2 border border-slate-800">
-                <div className="flex items-center gap-3 px-4">
-                <div className={`w-3 h-3 rounded-full ${isUserSpeaking ? 'bg-green-400 animate-pulse' : 'bg-slate-600'}`}></div>
-                <span className="text-xs font-medium text-slate-400">Microphone Active</span>
-                </div>
-                
-                <button
-                onClick={disconnect}
-                className="px-4 py-2 bg-red-500/10 text-red-400 hover:bg-red-500 hover:text-white rounded-xl text-xs font-bold uppercase tracking-wider transition-colors border border-red-500/20"
-                >
-                End Session
-                </button>
-            </div>
-            )}
+            <button
+              onMouseDown={startRecording}
+              onMouseUp={stopRecording}
+              onMouseLeave={isRecording ? stopRecording : undefined}
+              onTouchStart={(e) => { e.preventDefault(); startRecording(); }}
+              onTouchEnd={(e) => { e.preventDefault(); stopRecording(); }}
+              className={`relative z-10 w-24 h-24 rounded-full flex items-center justify-center transition-all shadow-2xl active:scale-90 touch-none ${
+                isRecording 
+                  ? 'bg-red-600 scale-110 shadow-red-500/50' 
+                  : 'bg-blue-600 hover:bg-blue-500 shadow-blue-500/50'
+              }`}
+            >
+              {isRecording ? (
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-10 w-10 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
+                </svg>
+              ) : (
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-10 w-10 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
+                </svg>
+              )}
+            </button>
+          </div>
+          
+          <div className="text-center space-y-1">
+            <p className="text-slate-400 font-bold text-xs uppercase tracking-tighter">
+              {isRecording ? 'Release to Send' : 'Hold to Talk'}
+            </p>
+            <p className="text-slate-600 text-[10px] uppercase font-medium">Flash Chat + Native TTS Pipeline</p>
+          </div>
 
-            <div className="text-center">
-                <p className="text-[10px] text-slate-600 uppercase tracking-widest font-medium">
-                Powered by Gemini Live API (Native Audio)
-                </p>
+          {error && (
+            <div className="bg-red-500/10 border border-red-500/20 text-red-400 p-3 rounded-xl text-xs font-medium text-center w-full animate-in fade-in slide-in-from-bottom-2">
+              {error}
             </div>
+          )}
+        </div>
+      )}
+
+      {/* Fullscreen Mobile-style Controls */}
+      {isFullScreen && (
+        <div className="absolute bottom-12 left-0 right-0 flex flex-col items-center gap-4 z-30">
+           <button
+              onMouseDown={startRecording}
+              onMouseUp={stopRecording}
+              onTouchStart={(e) => { e.preventDefault(); startRecording(); }}
+              onTouchEnd={(e) => { e.preventDefault(); stopRecording(); }}
+              className={`w-20 h-20 rounded-full flex items-center justify-center backdrop-blur-md border border-white/20 transition-all active:scale-95 touch-none ${
+                isRecording ? 'bg-red-600/80 scale-110' : 'bg-white/10'
+              }`}
+           >
+              <svg xmlns="http://www.w3.org/2000/svg" className="h-8 w-8 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
+              </svg>
+           </button>
         </div>
       )}
     </div>

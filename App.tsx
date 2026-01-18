@@ -1,5 +1,5 @@
 
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import { AppState, Frame, SourceVideo } from './types';
 import { VideoManager } from './components/VideoManager';
 import { ProcessingOverlay } from './components/ProcessingOverlay';
@@ -11,6 +11,8 @@ const App: React.FC = () => {
     sourceVideos: [],
     frames: [],
   });
+
+  const loadInputRef = useRef<HTMLInputElement>(null);
 
   const handleVideosUpdate = (sourceVideos: SourceVideo[]) => {
     setState({ ...state, sourceVideos });
@@ -28,6 +30,50 @@ const App: React.FC = () => {
     // Revoke blob URLs to prevent memory leaks
     state.sourceVideos.forEach(v => URL.revokeObjectURL(v.previewUrl));
     setState({ step: 'setup', sourceVideos: [], frames: [] });
+  };
+
+  const saveCharacter = () => {
+    if (state.frames.length === 0) return;
+    const data = JSON.stringify(state.frames);
+    const blob = new Blob([data], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `character-${new Date().toISOString().slice(0, 10)}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  const loadCharacter = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      try {
+        const frames = JSON.parse(event.target?.result as string) as Frame[];
+        if (Array.isArray(frames) && frames.length > 0 && frames[0].dataUrl && frames[0].state) {
+           // Cleanup old resources
+           state.sourceVideos.forEach(v => URL.revokeObjectURL(v.previewUrl));
+           
+           setState({ 
+             step: 'interact', 
+             sourceVideos: [], // Source videos are lost on load, as we only have frames
+             frames 
+           });
+        } else {
+            alert("Invalid character file format.");
+        }
+      } catch (err) {
+        console.error(err);
+        alert("Failed to load character.");
+      }
+      // Reset input value to allow reloading the same file
+      if (loadInputRef.current) loadInputRef.current.value = '';
+    };
+    reader.readAsText(file);
   };
 
   return (
@@ -63,17 +109,52 @@ const App: React.FC = () => {
           </div>
         </nav>
 
-        {state.step !== 'setup' && (
-          <button 
-            onClick={reset}
-            className="text-xs font-bold text-slate-400 hover:text-white transition-colors flex items-center gap-1 group bg-slate-900 px-3 py-1.5 rounded-lg border border-slate-800"
-          >
-            <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 transition-transform group-hover:-rotate-90" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-            </svg>
-            New Project
-          </button>
-        )}
+        <div className="flex items-center gap-3">
+          {state.step === 'setup' && (
+            <>
+              <input 
+                type="file" 
+                accept=".json" 
+                className="hidden" 
+                ref={loadInputRef} 
+                onChange={loadCharacter} 
+              />
+              <button 
+                onClick={() => loadInputRef.current?.click()}
+                className="text-xs font-bold text-slate-300 hover:text-white hover:bg-slate-800 transition-all flex items-center gap-2 px-3 py-1.5 rounded-lg border border-slate-700 bg-slate-900"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+                </svg>
+                Load Character
+              </button>
+            </>
+          )}
+
+          {state.step === 'interact' && (
+            <button 
+              onClick={saveCharacter}
+              className="text-xs font-bold text-green-400 hover:text-green-300 hover:bg-green-500/10 transition-all flex items-center gap-2 px-3 py-1.5 rounded-lg border border-green-500/30 bg-green-500/5"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+              </svg>
+              Save Character
+            </button>
+          )}
+
+          {state.step !== 'setup' && (
+            <button 
+              onClick={reset}
+              className="text-xs font-bold text-slate-400 hover:text-white transition-colors flex items-center gap-1 group bg-slate-900 px-3 py-1.5 rounded-lg border border-slate-800"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 transition-transform group-hover:-rotate-90" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+              </svg>
+              New Project
+            </button>
+          )}
+        </div>
       </header>
 
       {/* Main Content */}
@@ -114,7 +195,7 @@ const App: React.FC = () => {
       <footer className="px-6 py-8 border-t border-slate-900 bg-slate-950/80 backdrop-blur-sm flex flex-col md:flex-row justify-between items-center gap-4 text-slate-500 text-sm">
         <div className="flex items-center gap-2">
           <span className="w-2 h-2 rounded-full bg-blue-500 animate-pulse"></span>
-          <p>Avatar Animator Pro v2.0 • Gemini 2.5 Native Audio</p>
+          <p>Avatar Animator Pro v2.1 • Gemini 2.5 Native Audio</p>
         </div>
         <div className="flex gap-6">
           <a href="#" className="hover:text-blue-400 transition-colors">Documentation</a>

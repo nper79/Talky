@@ -38,3 +38,17 @@ export function encode(bytes: Uint8Array): string {
   }
   return btoa(binary);
 }
+
+// Convert Float32 audio from microphone to Int16 PCM Base64 for the API
+export function float32ToBase64PCM(float32Array: Float32Array): string {
+  const int16Array = new Int16Array(float32Array.length);
+  for (let i = 0; i < float32Array.length; i++) {
+    // Clamp values to [-1, 1]
+    const s = Math.max(-1, Math.min(1, float32Array[i]));
+    // Scale to 16-bit integer range
+    int16Array[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+  }
+  // Convert to bytes
+  const bytes = new Uint8Array(int16Array.buffer);
+  return encode(bytes);
+}

@@ -1,0 +1,7 @@
+{
+  "name": "Avatar Animator Pro",
+  "description": "Convert video clips into animated avatars with AI-powered speech synthesis. Extract frames, label idle and talking states, and interact using Gemini's text-to-speech.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}

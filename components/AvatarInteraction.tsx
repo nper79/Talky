@@ -15,6 +15,7 @@ export const AvatarInteraction: React.FC<Props> = ({ frames }) => {
   const [isUserSpeaking, setIsUserSpeaking] = useState(false); // User is inputting audio (VAD)
   const [currentFrameIndex, setCurrentFrameIndex] = useState(0);
   const [error, setError] = useState<string | null>(null);
+  const [isFullScreen, setIsFullScreen] = useState(false);
   
   // Refs for Audio & Session
   const inputAudioContextRef = useRef<AudioContext | null>(null);
@@ -144,8 +145,6 @@ export const AvatarInteraction: React.FC<Props> = ({ frames }) => {
             if (msg.serverContent?.interrupted) {
               console.log("Model interrupted");
               nextStartTimeRef.current = 0; // Stop future playback
-              // Note: We can't easily stop currently playing nodes without tracking them all, 
-              // but resetting nextStartTime prevents queue build-up.
             }
           },
           onclose: () => {
@@ -215,20 +214,41 @@ export const AvatarInteraction: React.FC<Props> = ({ frames }) => {
     : idleFrames.length > 0 ? idleFrames[currentFrameIndex % idleFrames.length] : frames[currentFrameIndex];
 
   return (
-    <div className="max-w-4xl mx-auto flex flex-col items-center animate-in fade-in duration-700 w-full">
+    <div className={`flex flex-col items-center w-full transition-all duration-500 ${isFullScreen ? 'fixed inset-0 z-50 bg-black justify-center' : 'max-w-4xl mx-auto animate-in fade-in duration-700'}`}>
       
-      {/* Avatar Display - 9:16 Aspect Ratio */}
-      <div className="relative w-full max-w-[360px] aspect-[9/16] bg-slate-900 rounded-3xl overflow-hidden border-4 border-slate-800 shadow-2xl mb-6 group ring-1 ring-slate-800/50">
+      {/* Avatar Display */}
+      <div className={`relative overflow-hidden transition-all duration-500 ${
+        isFullScreen 
+          ? 'w-full h-full' 
+          : 'w-full max-w-[360px] aspect-[9/16] bg-slate-900 rounded-3xl border-4 border-slate-800 shadow-2xl mb-6 group ring-1 ring-slate-800/50'
+      }`}>
         {currentFrame && (
           <img 
             src={currentFrame.dataUrl} 
-            className="w-full h-full object-cover transition-opacity duration-300" 
+            className="w-full h-full object-cover transition-opacity duration-300"
             alt="Avatar" 
           />
         )}
         
-        {/* Status Badge */}
-        <div className="absolute top-4 right-4 px-3 py-1 bg-slate-950/60 backdrop-blur-md rounded-full border border-white/10 flex items-center gap-2">
+        {/* Full Screen Toggle Button (Top Left) */}
+        <button 
+          onClick={() => setIsFullScreen(!isFullScreen)}
+          className="absolute top-4 left-4 p-2.5 bg-slate-950/40 hover:bg-slate-900 backdrop-blur-md rounded-full text-white transition-all border border-white/10 z-20 hover:scale-110 active:scale-95 shadow-lg"
+          title={isFullScreen ? "Exit Full Screen" : "Enter Full Screen"}
+        >
+          {isFullScreen ? (
+             <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+               <path fillRule="evenodd" d="M5 10a1 1 0 011-1h8a1 1 0 110 2H6a1 1 0 01-1-1z" clipRule="evenodd" />
+             </svg>
+          ) : (
+             <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+               <path fillRule="evenodd" d="M3 4a1 1 0 011-1h4a1 1 0 010 2H6.414l2.293 2.293a1 1 0 11-1.414 1.414L5 6.414V8a1 1 0 01-2 0V4zm9 1a1 1 0 010-2h4a1 1 0 011 1v4a1 1 0 01-2 0V6.414l-2.293 2.293a1 1 0 11-1.414-1.414L13.586 5H12zm-9 9a1 1 0 011-1h4a1 1 0 010 2H6.414l2.293 2.293a1 1 0 01-1.414 1.414L5 13.586V15a1 1 0 01-2 0v-4a1 1 0 011-1zm9 1a1 1 0 010-2h4a1 1 0 011 1v4a1 1 0 01-2 0v-1.586l-2.293 2.293a1 1 0 01-1.414-1.414L13.586 15H12z" clipRule="evenodd" />
+             </svg>
+          )}
+        </button>
+
+        {/* Status Badge (Top Right) */}
+        <div className="absolute top-4 right-4 px-3 py-1 bg-slate-950/60 backdrop-blur-md rounded-full border border-white/10 flex items-center gap-2 z-20">
           <div className={`w-2 h-2 rounded-full transition-colors duration-300 ${
             isConnected 
               ? (isSpeaking ? 'bg-green-500 shadow-[0_0_10px_rgba(34,197,94,0.8)]' : 'bg-blue-500') 
@@ -241,12 +261,12 @@ export const AvatarInteraction: React.FC<Props> = ({ frames }) => {
 
         {/* User Speaking Visualizer (Simple Pulse) */}
         {isConnected && (
-          <div className={`absolute bottom-0 left-0 right-0 h-1 bg-gradient-to-r from-blue-500 to-indigo-500 transition-opacity duration-200 ${isUserSpeaking ? 'opacity-100' : 'opacity-0'}`}></div>
+          <div className={`absolute bottom-0 left-0 right-0 h-1 bg-gradient-to-r from-blue-500 to-indigo-500 transition-opacity duration-200 z-10 ${isUserSpeaking ? 'opacity-100' : 'opacity-0'}`}></div>
         )}
         
-        {/* Connection Overlay */}
+        {/* Connection Overlay (Center - Visible when disconnected) */}
         {!isConnected && !error && (
-          <div className="absolute inset-0 bg-slate-950/60 backdrop-blur-[2px] flex items-center justify-center">
+          <div className="absolute inset-0 bg-slate-950/60 backdrop-blur-[2px] flex items-center justify-center z-20">
              <button 
                onClick={connect}
                className="px-8 py-3 bg-blue-600 hover:bg-blue-500 text-white rounded-2xl font-bold uppercase tracking-wider shadow-xl shadow-blue-600/20 hover:scale-105 transition-all flex items-center gap-2"
@@ -258,44 +278,72 @@ export const AvatarInteraction: React.FC<Props> = ({ frames }) => {
              </button>
           </div>
         )}
-      </div>
 
-      {/* Interaction Controls */}
-      <div className="w-full max-w-[400px] space-y-4">
-        {error && (
-          <div className="bg-red-500/10 border border-red-500/50 text-red-400 text-xs p-3 rounded-xl flex items-center gap-2 animate-in slide-in-from-top-2 justify-between">
-            <div className="flex items-center gap-2">
-              <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-              </svg>
-              <span>{error}</span>
+        {/* Full Screen Controls Overlay (Bottom - Visible when Connected in FS) */}
+        {isFullScreen && isConnected && (
+            <div className="absolute bottom-12 left-0 right-0 flex justify-center z-30 pointer-events-none">
+                 <button
+                    onClick={disconnect}
+                    className="pointer-events-auto px-8 py-4 bg-red-600 hover:bg-red-500 text-white rounded-full font-bold shadow-2xl flex items-center gap-3 backdrop-blur-md border border-white/10 transition-transform hover:scale-105 active:scale-95"
+                >
+                    <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                       <path fillRule="evenodd" d="M3 5a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zM3 10a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zM3 15a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1z" clipRule="evenodd" />
+                    </svg>
+                    End Session
+                </button>
             </div>
-            <button onClick={connect} className="underline hover:text-red-300">Retry</button>
-          </div>
         )}
         
-        {isConnected && (
-           <div className="flex items-center justify-between bg-slate-900 rounded-2xl p-2 border border-slate-800">
-             <div className="flex items-center gap-3 px-4">
-               <div className={`w-3 h-3 rounded-full ${isUserSpeaking ? 'bg-green-400 animate-pulse' : 'bg-slate-600'}`}></div>
-               <span className="text-xs font-medium text-slate-400">Microphone Active</span>
-             </div>
-             
-             <button
-              onClick={disconnect}
-              className="px-4 py-2 bg-red-500/10 text-red-400 hover:bg-red-500 hover:text-white rounded-xl text-xs font-bold uppercase tracking-wider transition-colors border border-red-500/20"
-             >
-               End Session
-             </button>
-           </div>
+        {/* Error Overlay in Full Screen */}
+        {isFullScreen && error && (
+            <div className="absolute top-20 left-4 right-4 z-30">
+               <div className="bg-red-500/90 backdrop-blur-md border border-white/10 text-white text-sm p-4 rounded-xl flex items-center justify-between shadow-xl">
+                  <span>{error}</span>
+                  <button onClick={connect} className="bg-white/20 px-3 py-1 rounded-lg text-xs font-bold uppercase hover:bg-white/30">Retry</button>
+               </div>
+            </div>
         )}
 
-        <div className="text-center">
-            <p className="text-[10px] text-slate-600 uppercase tracking-widest font-medium">
-              Powered by Gemini Live API (Native Audio)
-            </p>
-        </div>
       </div>
+
+      {/* Normal Controls (Only visible if NOT full screen) */}
+      {!isFullScreen && (
+        <div className="w-full max-w-[400px] space-y-4">
+            {error && (
+            <div className="bg-red-500/10 border border-red-500/50 text-red-400 text-xs p-3 rounded-xl flex items-center gap-2 animate-in slide-in-from-top-2 justify-between">
+                <div className="flex items-center gap-2">
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                <span>{error}</span>
+                </div>
+                <button onClick={connect} className="underline hover:text-red-300">Retry</button>
+            </div>
+            )}
+            
+            {isConnected && (
+            <div className="flex items-center justify-between bg-slate-900 rounded-2xl p-2 border border-slate-800">
+                <div className="flex items-center gap-3 px-4">
+                <div className={`w-3 h-3 rounded-full ${isUserSpeaking ? 'bg-green-400 animate-pulse' : 'bg-slate-600'}`}></div>
+                <span className="text-xs font-medium text-slate-400">Microphone Active</span>
+                </div>
+                
+                <button
+                onClick={disconnect}
+                className="px-4 py-2 bg-red-500/10 text-red-400 hover:bg-red-500 hover:text-white rounded-xl text-xs font-bold uppercase tracking-wider transition-colors border border-red-500/20"
+                >
+                End Session
+                </button>
+            </div>
+            )}
+
+            <div className="text-center">
+                <p className="text-[10px] text-slate-600 uppercase tracking-widest font-medium">
+                Powered by Gemini Live API (Native Audio)
+                </p>
+            </div>
+        </div>
+      )}
     </div>
   );
 };
